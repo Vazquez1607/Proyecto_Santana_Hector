@@ -1,0 +1,120 @@
+"Este archivo contiene el script de CONFIGURACION DE LA BASE DE DATOS, CAPTURA LOS DATOS DE EQUIPO, PUERTOS, CONEXION DE LA BASE DE DATOS, INSERT FABRICANTE, REGISTRO DE PUERTOS." 
+
+# ==============================
+# CONFIGURACIÓN DE BASE DE DATOS
+# ==============================
+$server   = "148.227.3.238"
+$port     = 3306
+$database = "lisi3310"
+$user     = "lisi3310"
+$pass     = "Luis1234"
+
+# Cargar conector MySQL
+[void][System.Reflection.Assembly]::LoadWithPartialName("MySql.Data")
+$connStr = "Server=$server;Port=$port;Uid=$user;Pwd=$pass;Database=$database;SslMode=None;"
+
+# ==============================
+# CAPTURA DE DATOS DEL EQUIPO
+# ==============================
+$Hostname   = $env:COMPUTERNAME
+$OS         = (Get-CimInstance Win32_OperatingSystem).Caption
+$MAC        = (Get-NetAdapter | Where-Object {$_.Status -eq "Up"} | Select-Object -First 1).MacAddress
+$IP         = (Get-NetIPAddress | Where-Object { $_.AddressFamily -eq "IPv4" -and $_.PrefixOrigin -ne "WellKnown" } | Select-Object -First 1).IPAddress
+$Encendido  = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+$Fabricante = (Get-CimInstance Win32_ComputerSystem).Manufacturer
+
+# ==============================
+# LISTA COMPLETA DE PUERTOS DE LA BASE
+# ==============================
+$ListaPuertos = @(
+    @{Puerto=20; Protocolo="TCP"}, @{Puerto=21; Protocolo="TCP"}, @{Puerto=22; Protocolo="TCP"},
+    @{Puerto=23; Protocolo="TCP"}, @{Puerto=25; Protocolo="TCP"}, @{Puerto=80; Protocolo="TCP"},
+    @{Puerto=110; Protocolo="TCP"}, @{Puerto=143; Protocolo="TCP"}, @{Puerto=443; Protocolo="TCP"},
+    @{Puerto=445; Protocolo="TCP"}, @{Puerto=465; Protocolo="TCP"}, @{Puerto=587; Protocolo="TCP"},
+    @{Puerto=993; Protocolo="TCP"}, @{Puerto=995; Protocolo="TCP"}, @{Puerto=135; Protocolo="TCP"},
+    @{Puerto=139; Protocolo="TCP"}, @{Puerto=1433; Protocolo="TCP"}, @{Puerto=1521; Protocolo="TCP"},
+    @{Puerto=3306; Protocolo="TCP"}, @{Puerto=3389; Protocolo="TCP"}, @{Puerto=5432; Protocolo="TCP"},
+    @{Puerto=5900; Protocolo="TCP"}, @{Puerto=8080; Protocolo="TCP"}, @{Puerto=19; Protocolo="TCP"},
+    @{Puerto=53; Protocolo="UDP"}, @{Puerto=67; Protocolo="UDP"}, @{Puerto=68; Protocolo="UDP"},
+    @{Puerto=69; Protocolo="UDP"}, @{Puerto=123; Protocolo="UDP"}, @{Puerto=137; Protocolo="UDP"},
+    @{Puerto=138; Protocolo="UDP"}, @{Puerto=161; Protocolo="UDP"}, @{Puerto=162; Protocolo="UDP"},
+    @{Puerto=514; Protocolo="UDP"}, @{Puerto=520; Protocolo="UDP"}, @{Puerto=1812; Protocolo="UDP"},
+    @{Puerto=1813; Protocolo="UDP"}, @{Puerto=1900; Protocolo="UDP"}, @{Puerto=4500; Protocolo="UDP"},
+    @{Puerto=5353; Protocolo="UDP"}
+)
+
+# ==============================
+# CONEXIÓN A BASE DE DATOS
+# ==============================
+$Conexion = New-Object MySql.Data.MySqlClient.MySqlConnection
+$Conexion.ConnectionString = $connStr
+
+try {
+    $Conexion.Open()
+
+    # -----------------------------
+    # 1) Insertar/actualizar fabricante
+    # -----------------------------
+    $QueryFab = @"
+INSERT INTO fabricante (nombre)
+VALUES ('$Fabricante')
+ON DUPLICATE KEY UPDATE id_fabricante=LAST_INSERT_ID(id_fabricante);
+"@
+    $cmdFab = New-Object MySql.Data.MySqlClient.MySqlCommand($QueryFab, $Conexion)
+    $cmdFab.ExecuteNonQuery() | Out-Null
+
+    # Obtener id_fabricante
+    $cmdGetFab = New-Object MySql.Data.MySqlClient.MySqlCommand("SELECT LAST_INSERT_ID();", $Conexion)
+    $idFabricante = [int]$cmdGetFab.ExecuteScalar()
+
+    # -----------------------------
+    # 2) Insertar/actualizar equipo
+    # -----------------------------
+    $QueryEquipo = @"
+INSERT INTO equipo (nombre, mac, ip, os, hora_encendido, id_fabricante)
+VALUES ('$Hostname', '$MAC', '$IP', '$OS', '$Encendido', $idFabricante)
+ON DUPLICATE KEY UPDATE
+    ip='$IP',
+    os='$OS',
+    hora_encendido='$Encendido',
+    id_fabricante=$idFabricante;
+"@
+    $cmdEquipo = New-Object MySql.Data.MySqlClient.MySqlCommand($QueryEquipo, $Conexion)
+    $cmdEquipo.ExecuteNonQuery() | Out-Null
+
+    # Obtener id_equipo
+    $cmdGetEquipo = New-Object MySql.Data.MySqlClient.MySqlCommand("SELECT id_equipo FROM equipo WHERE mac='$MAC';", $Conexion)
+    $idEquipo = [int]$cmdGetEquipo.ExecuteScalar()
+
+    # -----------------------------
+    # 3) Registrar puertos abiertos
+    # -----------------------------
+    foreach ($item in $ListaPuertos) {
+        if ($item.Protocolo -eq "TCP") {
+            $PuertoEstado = Get-NetTCPConnection -LocalPort $item.Puerto -ErrorAction SilentlyContinue
+        } else {
+            $PuertoEstado = netstat -ano | Select-String ":$($item.Puerto) " | Select-String "UDP"
+        }
+
+        if ($PuertoEstado) {
+            $sqlProto = "SELECT id_protocolo FROM protocolo WHERE numero=$($item.Puerto) AND tipo='$($item.Protocolo)';"
+            $cmdProto = New-Object MySql.Data.MySqlClient.MySqlCommand($sqlProto, $Conexion)
+            $idProtocolo = $cmdProto.ExecuteScalar()
+
+            if ($idProtocolo) {
+                $sqlInsertPU = "INSERT INTO protocolo_usado (id_equipo, id_protocolo, fecha_hora) VALUES ($idEquipo, $idProtocolo, '$Encendido');"
+                $cmdPU = New-Object MySql.Data.MySqlClient.MySqlCommand($sqlInsertPU, $Conexion)
+                $cmdPU.ExecuteNonQuery() | Out-Null
+            }
+        }
+    }
+
+    Write-Host "✅ Equipo, fabricante y puertos abiertos registrados correctamente" -ForegroundColor Green
+}
+catch {
+    Write-Host "❌ Error al registrar: $_" -ForegroundColor Red
+}
+finally {
+    if ($Conexion.State -eq 'Open') { $Conexion.Close() }
+}
+
